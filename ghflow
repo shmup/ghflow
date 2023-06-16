@@ -1,0 +1,237 @@
+#!/usr/bin/env python3
+import subprocess
+import urwid
+import signal
+import argparse
+"""
+Create and submit a new GitHub Pull Request.
+
+This script provides a simple terminal-based interface to create
+and submit a new GitHub Pull Request. The user can choose the branch
+type, enter the PR title and body, and the script will automatically
+generate the branch name, perform the necessary git actions, and open
+the PR in the browser.
+
+Usage:
+    Run the script and follow the prompts to enter the branch information.
+    Optionally, use the --dry-run flag to print the commands without executing them.
+
+Requirements:
+    - Python 3
+    - urwid package
+    - git CLI
+    - GitHub CLI (gh)
+
+Examples:
+    $ ghflow -h
+    $ ghflow --dry-run
+"""
+
+commands = []
+
+
+def handle_interrupt(_, __):
+    raise urwid.ExitMainLoop()
+
+
+signal.signal(signal.SIGINT, handle_interrupt)
+
+updating_branch_name = False
+updating_branch_type = False
+
+
+def cancel(_):
+    raise urwid.ExitMainLoop()
+
+
+escape_quotes = lambda s: s.replace('"', r'\"')
+print_dry_run = lambda command: print(" ".join(command)
+                                      ) if args.dry_run else None
+
+
+def focus_next_editable_widget(current_widget, direction='down'):
+    next_widget_idx = pile.focus_position
+    while True:
+        next_widget_idx = (next_widget_idx +
+                           (1 if direction == 'down' else -1)) % len(
+                               pile.contents)
+        next_widget, _ = pile.contents[next_widget_idx]
+
+        if isinstance(next_widget, urwid.Columns):
+            focused_widget = next_widget.get_focus()
+            if isinstance(focused_widget, urwid.Button):
+                if current_widget == pr_body_edit:
+                    next_widget.set_focus(0)
+                else:
+                    next_widget.set_focus((next_widget.focus_position + 1) %
+                                          len(next_widget.contents))
+            pile.set_focus(next_widget_idx)
+            return
+
+        if isinstance(next_widget, urwid.Edit):
+            pile.set_focus(next_widget_idx)
+            return
+
+        if next_widget == current_widget:
+            break
+
+
+class CustomRadioButton(urwid.RadioButton):
+
+    def __init__(self, group, label, user_data=None):
+        super().__init__(group=group, label=label, user_data=user_data)
+
+    def set_state(self, state, do_callback=True):
+        super().set_state(state, do_callback)
+        if state:
+            on_branch_type_change(state, self.get_label(), None)
+
+    def keypress(self, size, key):
+        # Check for arrow keys and navigate accordingly.
+        if key in ('up', 'down'):
+            focus_next_editable_widget(self, direction=key)
+        elif key in ('left', 'right'):
+            focused_widget = branch_type_columns.get_focus()
+            if isinstance(focused_widget, CustomRadioButton):
+                idx = self.group.index(focused_widget)
+                next_idx = (idx +
+                            (1 if key == 'right' else -1)) % len(self.group)
+                self.group[next_idx].set_state(True)
+                branch_type_columns.set_focus(self.group[next_idx])
+        elif key == 'enter':
+            focus_next_editable_widget(self, direction='down')
+        else:
+            return super().keypress(size, key)
+
+
+class CustomEdit(urwid.Edit):
+
+    def insert_text(self, text):
+        super().insert_text(text)
+        update_branch_name(self)
+
+    def delete(self, size):
+        super().delete(size)
+        update_branch_name(self)
+
+    def keypress(self, size, key):
+        if key == 'enter':
+            focus_next_editable_widget(self)
+        elif key in ('up', 'down'):
+            focus_next_editable_widget(self, direction=key)
+        else:
+            super().keypress(size, key)
+
+
+class CustomBodyEdit(urwid.Edit):
+
+    def keypress(self, size, key):
+        if key == 'enter':
+            focus_next_editable_widget(self, direction='down')
+        elif key in ('up', 'down'):
+            focus_next_editable_widget(self, direction=key)
+        else:
+            return super().keypress(size, key)
+
+
+def submit_pr(_):
+    pr_title = pr_title_edit.get_edit_text()
+    pr_body = pr_body_edit.get_edit_text()
+    branch_name_text = branch_name.text
+
+    git_checkout_command = ["git", "checkout", "-b", branch_name_text]
+    git_push_command = [
+        "git", "push", "--set-upstream", "origin", branch_name_text
+    ]
+
+    escaped_pr_title = escape_quotes(pr_title)
+    escaped_pr_body = escape_quotes(pr_body)
+
+    gh_pr_create_base = [
+        "gh", "pr", "create", "--web", "--title", f'{escaped_pr_title}'
+    ]
+    gh_pr_create_full = gh_pr_create_base + [
+        "--body", f'{escaped_pr_body}'
+    ] if pr_body else gh_pr_create_base
+
+    commands.extend(
+        [git_checkout_command, git_push_command, gh_pr_create_full])
+
+    raise urwid.ExitMainLoop()
+
+
+def update_branch_name(new_text, branch_type_name=''):
+    global updating_branch_name
+    if updating_branch_name:
+        return
+
+    # Check if new_text is not a string
+    if not isinstance(new_text, str):
+        new_text = new_text.get_edit_text()
+        if not new_text:
+            return
+
+    for radio_button in branch_type_radio_buttons:
+        if radio_button.state:
+            branch_type_name = radio_button.get_label()
+            break
+    updating_branch_name = True
+    branch_name.set_text(
+        f"{branch_type_name}/{new_text.replace(' ', '_')}".lower())
+    updating_branch_name = False
+
+
+def on_branch_type_change(new_state, branch_type_name, __):
+    global updating_branch_type
+    if updating_branch_type:
+        return
+
+    if new_state:
+        updating_branch_type = True
+        update_branch_name(pr_title_edit.get_edit_text(), branch_type_name)
+        updating_branch_type = False
+
+
+pr_body_edit = CustomBodyEdit("Body: ")
+pr_title_edit = CustomEdit("Title: ")
+branch_name = urwid.Text("Branch: ")
+submit_button = urwid.Button("Submit", submit_pr)
+cancel_button = urwid.Button("Cancel", cancel)
+branch_types = ["Feature", "Fix", "Chore", "Docs"]
+branch_type_label = urwid.Text("Type: ")
+branch_type_radio_buttons = []
+
+for idx, branch_type_name in enumerate(branch_types):
+    radio_button = CustomRadioButton(branch_type_radio_buttons,
+                                     branch_type_name)
+    if idx == 0:
+        radio_button.set_state(True, do_callback=True)
+
+branch_type_columns = urwid.Columns([(6, branch_type_label)] +
+                                    branch_type_radio_buttons,
+                                    dividechars=4)
+
+pile = urwid.Pile([
+    urwid.Text("Enter branch information:"), branch_type_columns,
+    pr_title_edit, pr_body_edit, branch_name,
+    urwid.Columns([submit_button, cancel_button], dividechars=4)
+])
+
+fill = urwid.Filler(pile, valign='top')
+
+parser = argparse.ArgumentParser(
+    description="Create and submit a new GitHub Pull Request.")
+parser.add_argument(
+    "-d",
+    "--dry-run",
+    action="store_true",
+    help="Perform a dry run, printing the commands instead of executing them.")
+args = parser.parse_args()
+
+if __name__ == "__main__":
+    urwid.MainLoop(fill).run()
+
+    for command in commands:
+        print_dry_run(command)
+        if not args.dry_run:
+            subprocess.run(command)
